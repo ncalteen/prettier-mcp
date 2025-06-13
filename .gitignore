@@ -20,6 +20,7 @@ pids
 lib-cov
 
 # Coverage directory used by tools like istanbul
+reports
 coverage
 *.lcov
 
@@ -89,7 +90,6 @@ out
 
 # Nuxt.js build / generate output
 .nuxt
-dist
 
 # Gatsby files
 .cache/
@@ -134,3 +134,6 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Ignore local MCP server configuration
+.vscode/mcp.json
