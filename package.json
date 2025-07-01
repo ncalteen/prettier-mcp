@@ -40,7 +40,7 @@
     "outputName": "jest-junit.xml"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.3",
+    "@modelcontextprotocol/sdk": "^1.13.2",
     "prettier": "^3.5.3",
     "yaml": "^2.8.0",
     "zod": "^3.25.64"
