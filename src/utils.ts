@@ -31,6 +31,7 @@ export async function getConfig(
       data: 'Error Resolving Prettier Configuration:',
       error
     })
+
     return {}
   }
 }
