@@ -4358,11 +4358,27 @@ const TextResourceContentsSchema = ResourceContentsSchema.extend({
      */
     text: stringType(),
 });
+/**
+ * A Zod schema for validating Base64 strings that is more performant and
+ * robust for very large inputs than the default regex-based check. It avoids
+ * stack overflows by using the native `atob` function for validation.
+ */
+const Base64Schema = stringType().refine((val) => {
+    try {
+        // atob throws a DOMException if the string contains characters
+        // that are not part of the Base64 character set.
+        atob(val);
+        return true;
+    }
+    catch (_a) {
+        return false;
+    }
+}, { message: "Invalid Base64 string" });
 const BlobResourceContentsSchema = ResourceContentsSchema.extend({
     /**
      * A base64-encoded string representing the binary data of the item.
      */
-    blob: stringType().base64(),
+    blob: Base64Schema,
 });
 /**
  * A known resource that the server is capable of reading.
@@ -4585,7 +4601,7 @@ const ImageContentSchema = objectType({
     /**
      * The base64-encoded image data.
      */
-    data: stringType().base64(),
+    data: Base64Schema,
     /**
      * The MIME type of the image. Different providers may support different image types.
      */
@@ -4605,7 +4621,7 @@ const AudioContentSchema = objectType({
     /**
      * The base64-encoded audio data.
      */
-    data: stringType().base64(),
+    data: Base64Schema,
     /**
      * The MIME type of the audio. Different providers may support different audio types.
      */
@@ -5047,7 +5063,7 @@ const ElicitResultSchema = ResultSchema.extend({
     /**
      * The user's response action.
      */
-    action: enumType(["accept", "reject", "cancel"]),
+    action: enumType(["accept", "decline", "cancel"]),
     /**
      * The collected user input content (only present if action is "accept").
      */
@@ -5246,6 +5262,7 @@ class Protocol {
         this._responseHandlers = new Map();
         this._progressHandlers = new Map();
         this._timeoutInfo = new Map();
+        this._pendingDebouncedNotifications = new Set();
         this.setNotificationHandler(CancelledNotificationSchema, (notification) => {
             const controller = this._requestHandlerAbortControllers.get(notification.params.requestId);
             controller === null || controller === void 0 ? void 0 : controller.abort(notification.params.reason);
@@ -5328,6 +5345,7 @@ class Protocol {
         const responseHandlers = this._responseHandlers;
         this._responseHandlers = new Map();
         this._progressHandlers.clear();
+        this._pendingDebouncedNotifications.clear();
         this._transport = undefined;
         (_a = this.onclose) === null || _a === void 0 ? void 0 : _a.call(this);
         const error = new McpError(ErrorCode.ConnectionClosed, "Connection closed");
@@ -5352,10 +5370,12 @@ class Protocol {
             .catch((error) => this._onerror(new Error(`Uncaught error in notification handler: ${error}`)));
     }
     _onrequest(request, extra) {
-        var _a, _b, _c, _d;
+        var _a, _b;
         const handler = (_a = this._requestHandlers.get(request.method)) !== null && _a !== void 0 ? _a : this.fallbackRequestHandler;
+        // Capture the current transport at request time to ensure responses go to the correct client
+        const capturedTransport = this._transport;
         if (handler === undefined) {
-            (_b = this._transport) === null || _b === void 0 ? void 0 : _b.send({
+            capturedTransport === null || capturedTransport === void 0 ? void 0 : capturedTransport.send({
                 jsonrpc: "2.0",
                 id: request.id,
                 error: {
@@ -5369,8 +5389,8 @@ class Protocol {
         this._requestHandlerAbortControllers.set(request.id, abortController);
         const fullExtra = {
             signal: abortController.signal,
-            sessionId: (_c = this._transport) === null || _c === void 0 ? void 0 : _c.sessionId,
-            _meta: (_d = request.params) === null || _d === void 0 ? void 0 : _d._meta,
+            sessionId: capturedTransport === null || capturedTransport === void 0 ? void 0 : capturedTransport.sessionId,
+            _meta: (_b = request.params) === null || _b === void 0 ? void 0 : _b._meta,
             sendNotification: (notification) => this.notification(notification, { relatedRequestId: request.id }),
             sendRequest: (r, resultSchema, options) => this.request(r, resultSchema, { ...options, relatedRequestId: request.id }),
             authInfo: extra === null || extra === void 0 ? void 0 : extra.authInfo,
@@ -5381,28 +5401,27 @@ class Protocol {
         Promise.resolve()
             .then(() => handler(request, fullExtra))
             .then((result) => {
-            var _a;
             if (abortController.signal.aborted) {
                 return;
             }
-            return (_a = this._transport) === null || _a === void 0 ? void 0 : _a.send({
+            return capturedTransport === null || capturedTransport === void 0 ? void 0 : capturedTransport.send({
                 result,
                 jsonrpc: "2.0",
                 id: request.id,
             });
         }, (error) => {
-            var _a, _b;
+            var _a;
             if (abortController.signal.aborted) {
                 return;
             }
-            return (_a = this._transport) === null || _a === void 0 ? void 0 : _a.send({
+            return capturedTransport === null || capturedTransport === void 0 ? void 0 : capturedTransport.send({
                 jsonrpc: "2.0",
                 id: request.id,
                 error: {
                     code: Number.isSafeInteger(error["code"])
                         ? error["code"]
                         : ErrorCode.InternalError,
-                    message: (_b = error.message) !== null && _b !== void 0 ? _b : "Internal error",
+                    message: (_a = error.message) !== null && _a !== void 0 ? _a : "Internal error",
                 },
             });
         })
@@ -5541,10 +5560,45 @@ class Protocol {
      * Emits a notification, which is a one-way message that does not expect a response.
      */
     async notification(notification, options) {
+        var _a, _b;
         if (!this._transport) {
             throw new Error("Not connected");
         }
         this.assertNotificationCapability(notification.method);
+        const debouncedMethods = (_b = (_a = this._options) === null || _a === void 0 ? void 0 : _a.debouncedNotificationMethods) !== null && _b !== void 0 ? _b : [];
+        // A notification can only be debounced if it's in the list AND it's "simple"
+        // (i.e., has no parameters and no related request ID that could be lost).
+        const canDebounce = debouncedMethods.includes(notification.method)
+            && !notification.params
+            && !(options === null || options === void 0 ? void 0 : options.relatedRequestId);
+        if (canDebounce) {
+            // If a notification of this type is already scheduled, do nothing.
+            if (this._pendingDebouncedNotifications.has(notification.method)) {
+                return;
+            }
+            // Mark this notification type as pending.
+            this._pendingDebouncedNotifications.add(notification.method);
+            // Schedule the actual send to happen in the next microtask.
+            // This allows all synchronous calls in the current event loop tick to be coalesced.
+            Promise.resolve().then(() => {
+                var _a;
+                // Un-mark the notification so the next one can be scheduled.
+                this._pendingDebouncedNotifications.delete(notification.method);
+                // SAFETY CHECK: If the connection was closed while this was pending, abort.
+                if (!this._transport) {
+                    return;
+                }
+                const jsonrpcNotification = {
+                    ...notification,
+                    jsonrpc: "2.0",
+                };
+                // Send the notification, but don't await it here to avoid blocking.
+                // Handle potential errors with a .catch().
+                (_a = this._transport) === null || _a === void 0 ? void 0 : _a.send(jsonrpcNotification, options).catch(error => this._onerror(error));
+            });
+            // Return immediately.
+            return;
+        }
         const jsonrpcNotification = {
             ...notification,
             jsonrpc: "2.0",
@@ -15001,10 +15055,6 @@ class McpServer {
             return registeredResourceTemplate;
         }
     }
-    /**
-     * Registers a resource with a config object and callback.
-     * For static resources, use a URI string. For dynamic resources, use a ResourceTemplate.
-     */
     registerResource(name, uriOrTemplate, config, readCallback) {
         if (typeof uriOrTemplate === "string") {
             if (this._registeredResources[uriOrTemplate]) {
@@ -15275,6 +15325,7 @@ class McpServer {
 }
 const EMPTY_OBJECT_JSON_SCHEMA = {
     type: "object",
+    properties: {},
 };
 // Helper to check if an object is a Zod schema (ZodRawShape)
 function isZodRawShape(obj) {
