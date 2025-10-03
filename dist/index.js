@@ -35104,7 +35104,7 @@ var { parsers, printers } = createParsersAndPrinters([
     printers: ["postcss"]
   },
   {
-    importPlugin: () => import('./typescript-oxV1YBIL.js'),
+    importPlugin: () => import('./typescript-B2A6Chhz.js'),
     parsers: ["typescript"]
   },
   {
