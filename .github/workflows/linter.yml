@@ -23,7 +23,7 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -40,6 +40,6 @@ jobs:
 
       - name: Lint Codebase
         id: lint
-        uses: oxsecurity/megalinter/flavors/javascript@v8
+        uses: oxsecurity/megalinter/flavors/javascript@v9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
